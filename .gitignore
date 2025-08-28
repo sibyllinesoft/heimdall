@@ -1,0 +1,110 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# TypeScript compiled output
+*.js
+*.js.map
+*.d.ts
+*.d.ts.map
+dist/
+build/
+
+# Exceptions for essential JS files
+!vitest.config.js
+!*.config.js
+!gulpfile.js
+!Gruntfile.js
+
+# Test artifacts and results
+test-results/
+test_artifacts/
+.cache/
+junit.xml
+coverage.xml
+*.tap
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data and environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE/Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build artifacts and caches
+artifacts/emergency.json
+artifacts/*.tar
+artifacts/*.json
+
+# ML/AI artifacts
+*.bin
+*.model
+*.pkl
+*.pickle
+faiss_index.bin
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Testing and development
+test-dir*/
+*-test.ts
+*-test.js
+scripts/test-*.ts
+scripts/simple-*.ts
+
+# Performance and monitoring
+*.perf
+*.prof

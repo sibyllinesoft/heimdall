@@ -1,0 +1,37 @@
+# Bifrost Router Configuration - Example
+router:
+  alpha: 0.60                   # quality tilt
+  thresholds:
+    cheap: 0.62
+    hard: 0.58
+  top_p: 3
+  penalties:
+    latency_sd: 0.05
+    ctx_over_80pct: 0.15
+  bucket_defaults:
+    mid:
+      gpt5_reasoning_effort: medium
+      gemini_thinking_budget: 6000
+    hard:
+      gpt5_reasoning_effort: high
+      gemini_thinking_budget: 20000
+  cheap_candidates: [ "deepseek/deepseek-r1", "qwen/qwen3-coder" ]
+  mid_candidates:   [ "openai/gpt-5", "google/gemini-2.5-pro" ]   # Claude is governed by OAuth presence
+  hard_candidates:  [ "openai/gpt-5", "google/gemini-2.5-pro" ]
+  openrouter:
+    exclude_authors: [ "anthropic" ]
+    provider:
+      sort: latency
+      max_price: 0.006
+      allow_fallbacks: true
+
+auth_adapters:
+  enabled: [ "anthropic-oauth", "google-oauth", "openai-key" ]
+
+catalog:
+  base_url: http://catalog:8080
+  refresh_seconds: 3600
+
+tuning:
+  artifact_url: s3://llm-router/artifacts/latest.tar
+  reload_seconds: 300

@@ -1,0 +1,127 @@
+# Bifrost Router Configuration Schema
+type: object
+properties:
+  router:
+    type: object
+    properties:
+      alpha:
+        type: number
+        description: Quality vs cost trade-off (0-1, higher = more quality focused)
+        default: 0.60
+        minimum: 0
+        maximum: 1
+      thresholds:
+        type: object
+        properties:
+          cheap:
+            type: number
+            description: Threshold for routing to cheap bucket
+            default: 0.62
+          hard:
+            type: number
+            description: Threshold for routing to hard bucket
+            default: 0.58
+      top_p:
+        type: integer
+        description: Number of top clusters to consider
+        default: 3
+      penalties:
+        type: object
+        properties:
+          latency_sd:
+            type: number
+            description: Penalty for high latency variance
+            default: 0.05
+          ctx_over_80pct:
+            type: number
+            description: Penalty for context usage over 80%
+            default: 0.15
+      bucket_defaults:
+        type: object
+        properties:
+          mid:
+            type: object
+            properties:
+              gpt5_reasoning_effort:
+                type: string
+                enum: ["low", "medium", "high"]
+                default: "medium"
+              gemini_thinking_budget:
+                type: integer
+                default: 6000
+          hard:
+            type: object
+            properties:
+              gpt5_reasoning_effort:
+                type: string
+                enum: ["low", "medium", "high"]
+                default: "high"
+              gemini_thinking_budget:
+                type: integer
+                default: 20000
+      cheap_candidates:
+        type: array
+        items:
+          type: string
+        default: ["deepseek/deepseek-r1", "qwen/qwen3-coder"]
+      mid_candidates:
+        type: array
+        items:
+          type: string
+        default: ["openai/gpt-5", "google/gemini-2.5-pro"]
+      hard_candidates:
+        type: array
+        items:
+          type: string
+        default: ["openai/gpt-5", "google/gemini-2.5-pro"]
+      openrouter:
+        type: object
+        properties:
+          exclude_authors:
+            type: array
+            items:
+              type: string
+            default: ["anthropic"]
+          provider:
+            type: object
+            properties:
+              sort:
+                type: string
+                default: "latency"
+              max_price:
+                type: number
+                default: 0.006
+              allow_fallbacks:
+                type: boolean
+                default: true
+
+  auth_adapters:
+    type: object
+    properties:
+      enabled:
+        type: array
+        items:
+          type: string
+        default: ["anthropic-oauth", "google-oauth", "openai-key"]
+
+  catalog:
+    type: object
+    properties:
+      base_url:
+        type: string
+        default: "http://catalog:8080"
+      refresh_seconds:
+        type: integer
+        default: 3600
+
+  tuning:
+    type: object
+    properties:
+      artifact_url:
+        type: string
+        default: "s3://llm-router/artifacts/latest.tar"
+      reload_seconds:
+        type: integer
+        default: 300
+
+required: ["router", "auth_adapters", "catalog", "tuning"]
