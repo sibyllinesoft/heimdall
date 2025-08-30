@@ -28,7 +28,7 @@ test-unit:
 	@echo "Running unit tests..."
 	go test -v -race
 
-# Run integration tests (requires TypeScript service)
+# Run integration tests (Go implementation only)
 test-integration:
 	@echo "Running integration tests..."
 	go test -v -race -tags=integration
@@ -47,23 +47,20 @@ clean:
 	rm -f heimdall-plugin heimdall.so
 	go clean -cache -testcache
 
-# Start TypeScript router service for testing
+# Start the Go plugin service for testing
 start-router:
-	@echo "Starting TypeScript router service..."
-	cd ../.. && npm install && npm run build
-	cd ../.. && npm start
+	@echo "Starting Go plugin service..."
+	go run . &
 
-# Health check the router service
-health:
-	@echo "Checking router service health..."
-	curl -s http://localhost:3000/health | jq '.'
+# Show plugin metrics
+metrics:
+	@echo "Showing plugin metrics..."
+	@echo "Plugin built as Go native implementation - metrics available via GetMetrics() method"
 
-# Test router service directly
-test-router:
-	@echo "Testing router service directly..."
-	curl -s -X POST http://localhost:3000/decide \
-		-H "Content-Type: application/json" \
-		-d '{"url":"/v1/chat/completions","method":"POST","body":{"messages":[{"role":"user","content":"Hello"}]}}' | jq '.'
+# Example usage
+example:
+	@echo "Running example usage..."
+	go run . --example
 
 # Format code
 fmt:

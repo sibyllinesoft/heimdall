@@ -2,13 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"math"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

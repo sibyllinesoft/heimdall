@@ -1,70 +1,68 @@
-# Dependencies
-node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/plugins/heimdall/heimdall-bifrost-plugin
+/plugins/*/main
+vendor/
 
-# Runtime data
-pids
-*.pid
-*.seed
-*.pid.lock
+# Go test files
+*.test
+*.prof
+coverage.out
+coverage.html
 
-# Coverage directory used by tools like istanbul
-coverage/
-*.lcov
+# Go dependencies
+go.work
+go.work.sum
 
-# nyc test coverage
-.nyc_output
-
-# TypeScript compiled output
-*.js
-*.js.map
-*.d.ts
-*.d.ts.map
-dist/
-build/
-
-# Exceptions for essential JS files
-!vitest.config.js
-!*.config.js
-!gulpfile.js
-!Gruntfile.js
-
-# Test artifacts and results
-test-results/
-test_artifacts/
-.cache/
-junit.xml
-coverage.xml
-*.tap
-
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
-
-# Runtime data and environment
+# Environment files
 .env
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# Database files
-*.db
-*.sqlite
-*.sqlite3
+# Logs and runtime data
+logs/
+*.log
+*.pid
+*.seed
+*.pid.lock
 
-# Temporary files
+# Temporary files and caches
 temp/
 tmp/
 *.tmp
 *.temp
+.cache/
+cache/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+data/
+
+# Build and test artifacts
+test-results/
+test_artifacts/
+artifacts/
+coverage/
+*.lcov
+junit.xml
+coverage.xml
+*.tap
+
+# Development tools
+.air.toml
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS generated files
 .DS_Store
@@ -75,36 +73,37 @@ tmp/
 ehthumbs.db
 Thumbs.db
 
-# IDE/Editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Docker
+docker-compose.override.yml
 
-# Build artifacts and caches
-artifacts/emergency.json
-artifacts/*.tar
-artifacts/*.json
-
-# ML/AI artifacts
+# AI/ML artifacts
 *.bin
 *.model
 *.pkl
 *.pickle
 faiss_index.bin
 
-# Docker
-.dockerignore
-docker-compose.override.yml
+# Legacy Node.js artifacts (cleanup)
+node_modules/
+package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dist/
+build/
+*.js.map
+*.d.ts
+*.d.ts.map
+.nyc_output
 
-# Testing and development
-test-dir*/
-*-test.ts
-*-test.js
-scripts/test-*.ts
-scripts/simple-*.ts
+# Analysis and documentation tools
+.serena/
+.scribeignore
+scribe.config.json
+scribe_analysis.json
 
-# Performance and monitoring
+# Performance profiling
 *.perf
-*.prof
+cpu.prof
+mem.prof
+block.prof

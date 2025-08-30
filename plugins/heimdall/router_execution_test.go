@@ -26,7 +26,7 @@ import (
 func TestRouterExecutorCore(t *testing.T) {
 	t.Run("decide method comprehensive test", func(t *testing.T) {
 		t.Run("should make routing decision for simple request", func(t *testing.T) {
-			plugin := createTestPlugin(t)
+			plugin := createRouterTestPlugin(t)
 			
 			req := &RouterRequest{
 				URL:    "/v1/chat/completions",
@@ -62,7 +62,7 @@ func TestRouterExecutorCore(t *testing.T) {
 		})
 		
 		t.Run("should handle code-heavy requests", func(t *testing.T) {
-			plugin := createTestPlugin(t)
+			plugin := createRouterTestPlugin(t)
 			
 			req := &RouterRequest{
 				URL:    "/v1/chat/completions", 
@@ -83,7 +83,7 @@ func TestRouterExecutorCore(t *testing.T) {
 		})
 		
 		t.Run("should handle math-heavy requests", func(t *testing.T) {
-			plugin := createTestPlugin(t)
+			plugin := createRouterTestPlugin(t)
 			
 			req := &RouterRequest{
 				URL:    "/v1/chat/completions",
@@ -104,7 +104,7 @@ func TestRouterExecutorCore(t *testing.T) {
 		})
 		
 		t.Run("should handle long context requests", func(t *testing.T) {
-			plugin := createTestPlugin(t)
+			plugin := createRouterTestPlugin(t)
 			
 			// Create a very long message
 			longContent := strings.Repeat("This is a very long message that will exceed typical context limits. ", 1000)
@@ -131,7 +131,7 @@ func TestRouterExecutorCore(t *testing.T) {
 		})
 		
 		t.Run("should handle authentication information", func(t *testing.T) {
-			plugin := createTestPlugin(t)
+			plugin := createRouterTestPlugin(t)
 			
 			req := &RouterRequest{
 				URL:    "/v1/chat/completions",
@@ -178,7 +178,7 @@ func TestRouterExecutorCore(t *testing.T) {
 // TestBucketSelection tests the bucket selection logic with guardrails
 func TestBucketSelection(t *testing.T) {
 	t.Run("selectBucket method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		t.Run("should select cheap bucket for high cheap probability", func(t *testing.T) {
 			probs := &BucketProbabilities{
@@ -253,7 +253,7 @@ func TestBucketSelection(t *testing.T) {
 	})
 	
 	t.Run("contextExceedsCapacity method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		testCases := []struct {
 			name        string
@@ -285,7 +285,7 @@ func TestBucketSelection(t *testing.T) {
 // TestModelSelection tests the in-bucket model selection logic
 func TestModelSelection(t *testing.T) {
 	t.Run("selectModel method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		features := &RequestFeatures{
 			ClusterID:     1,
 			TokenCount:    5000,
@@ -358,7 +358,7 @@ func TestModelSelection(t *testing.T) {
 	})
 	
 	t.Run("selectModelForBucket method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		features := &RequestFeatures{
 			ClusterID:     2,
 			TokenCount:    10000,
@@ -448,7 +448,7 @@ func TestModelSelection(t *testing.T) {
 
 // TestProviderInference tests provider kind inference from model names
 func TestProviderInference(t *testing.T) {
-	plugin := createTestPlugin(t)
+	plugin := createRouterTestPlugin(t)
 	
 	testCases := []struct {
 		model           string
@@ -475,7 +475,7 @@ func TestProviderInference(t *testing.T) {
 
 // TestProviderPreferences tests provider preferences for different buckets
 func TestProviderPreferences(t *testing.T) {
-	plugin := createTestPlugin(t)
+	plugin := createRouterTestPlugin(t)
 	
 	t.Run("should return correct preferences for cheap bucket", func(t *testing.T) {
 		prefs := plugin.getProviderPreferencesForBucket("cheap")
@@ -509,18 +509,18 @@ func TestProviderPreferences(t *testing.T) {
 // TestRequestConversion tests conversion between Bifrost and internal request formats
 func TestRequestConversion(t *testing.T) {
 	t.Run("convertToRouterRequest method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		ctx := context.Background()
 		
 		t.Run("should convert basic chat completion request", func(t *testing.T) {
 			content := "Hello, world!"
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "gpt-4o",
-				Input: schemas.BifrostRequestInput{
-					ChatCompletionInput: &[]schemas.ChatCompletionMessage{
+				Input: schemas.RequestInput{
+					ChatCompletionInput: &[]schemas.BifrostMessage{
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &content},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &content},
 						},
 					},
 				},
@@ -546,19 +546,19 @@ func TestRequestConversion(t *testing.T) {
 			
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "claude-3-5-sonnet",
-				Input: schemas.BifrostRequestInput{
-					ChatCompletionInput: &[]schemas.ChatCompletionMessage{
+				Input: schemas.RequestInput{
+					ChatCompletionInput: &[]schemas.BifrostMessage{
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &userContent},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &userContent},
 						},
 						{
-							Role:    schemas.ChatCompletionMessageRoleAssistant,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &assistantContent},
+							Role:    schemas.ModelChatMessageRoleAssistant,
+							Content: schemas.MessageContent{ContentStr: &assistantContent},
 						},
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &userContent2},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &userContent2},
 						},
 					},
 				},
@@ -585,11 +585,11 @@ func TestRequestConversion(t *testing.T) {
 			
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "gpt-4o",
-				Input: schemas.BifrostRequestInput{
-					ChatCompletionInput: &[]schemas.ChatCompletionMessage{
+				Input: schemas.RequestInput{
+					ChatCompletionInput: &[]schemas.BifrostMessage{
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &content},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &content},
 						},
 					},
 				},
@@ -605,7 +605,7 @@ func TestRequestConversion(t *testing.T) {
 		t.Run("should handle empty chat completion input", func(t *testing.T) {
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "gpt-4o",
-				Input: schemas.BifrostRequestInput{
+				Input: schemas.RequestInput{
 					ChatCompletionInput: nil,
 				},
 			}
@@ -621,18 +621,18 @@ func TestRequestConversion(t *testing.T) {
 // TestRoutingDecisionApplication tests applying routing decisions to requests
 func TestRoutingDecisionApplication(t *testing.T) {
 	t.Run("applyRoutingDecision method tests", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		ctx := context.Background()
 		
 		t.Run("should apply basic routing decision", func(t *testing.T) {
 			content := "Test message"
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "original-model",
-				Input: schemas.BifrostRequestInput{
-					ChatCompletionInput: &[]schemas.ChatCompletionMessage{
+				Input: schemas.RequestInput{
+					ChatCompletionInput: &[]schemas.BifrostMessage{
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &content},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &content},
 						},
 					},
 				},
@@ -666,11 +666,11 @@ func TestRoutingDecisionApplication(t *testing.T) {
 			content := "Test message"
 			bifrostReq := &schemas.BifrostRequest{
 				Model: "original-model",
-				Input: schemas.BifrostRequestInput{
-					ChatCompletionInput: &[]schemas.ChatCompletionMessage{
+				Input: schemas.RequestInput{
+					ChatCompletionInput: &[]schemas.BifrostMessage{
 						{
-							Role:    schemas.ChatCompletionMessageRoleUser,
-							Content: schemas.ChatCompletionMessageContent{ContentStr: &content},
+							Role:    schemas.ModelChatMessageRoleUser,
+							Content: schemas.MessageContent{ContentStr: &content},
 						},
 					},
 				},
@@ -820,7 +820,7 @@ func TestArtifactManagement(t *testing.T) {
 // TestConcurrentRouting tests concurrent request handling
 func TestConcurrentRouting(t *testing.T) {
 	t.Run("concurrent decide calls", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		// Create multiple requests
 		requests := make([]*RouterRequest, 10)
@@ -898,7 +898,7 @@ func TestConcurrentRouting(t *testing.T) {
 // TestPerformanceOptimization tests performance-related optimizations
 func TestPerformanceOptimization(t *testing.T) {
 	t.Run("feature extraction timeout handling", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		// Create request with very long content to test timeout
 		longContent := strings.Repeat("This is a test message that will be very long. ", 10000)
@@ -926,7 +926,7 @@ func TestPerformanceOptimization(t *testing.T) {
 	})
 	
 	t.Run("caching effectiveness", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		// Same request should use cached embedding
 		content := "This is a test message for caching"
@@ -961,7 +961,7 @@ func TestPerformanceOptimization(t *testing.T) {
 	})
 	
 	t.Run("memory efficient header processing", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		// Test with various header formats
 		testCases := []map[string][]string{
@@ -986,7 +986,7 @@ func TestPerformanceOptimization(t *testing.T) {
 // TestLoadBalancingAndFallbacks tests load balancing and fallback logic
 func TestLoadBalancingAndFallbacks(t *testing.T) {
 	t.Run("fallback model ordering", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		features := &RequestFeatures{ClusterID: 1, TokenCount: 5000}
 		
 		decision, err := plugin.selectModelForBucket("mid", features)
@@ -1004,7 +1004,7 @@ func TestLoadBalancingAndFallbacks(t *testing.T) {
 	})
 	
 	t.Run("provider preferences affect selection", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		cheapPrefs := plugin.getProviderPreferencesForBucket("cheap")
 		midPrefs := plugin.getProviderPreferencesForBucket("mid")
@@ -1026,7 +1026,7 @@ func TestLoadBalancingAndFallbacks(t *testing.T) {
 // TestErrorHandling tests comprehensive error handling scenarios
 func TestErrorHandling(t *testing.T) {
 	t.Run("malformed request handling", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		
 		// Nil body
 		req1 := &RouterRequest{
@@ -1055,7 +1055,7 @@ func TestErrorHandling(t *testing.T) {
 	
 	t.Run("missing configuration handling", func(t *testing.T) {
 		// Test plugin with missing candidates
-		config := createTestConfig()
+		config := createRouterTestConfig()
 		config.Router.MidCandidates = []string{} // Empty candidates
 		
 		plugin, err := createPluginWithConfig(t, config)
@@ -1069,7 +1069,7 @@ func TestErrorHandling(t *testing.T) {
 	})
 	
 	t.Run("alpha scorer edge cases", func(t *testing.T) {
-		plugin := createTestPlugin(t)
+		plugin := createRouterTestPlugin(t)
 		features := &RequestFeatures{ClusterID: 999, TokenCount: 1000} // Non-existent cluster
 		
 		// Should handle gracefully with fallback
@@ -1085,8 +1085,8 @@ func TestErrorHandling(t *testing.T) {
 // ============================================================================
 
 // createTestPlugin creates a fully configured plugin for testing
-func createTestPlugin(t *testing.T) *Plugin {
-	config := createTestConfig()
+func createRouterTestPlugin(t *testing.T) *Plugin {
+	config := createRouterTestConfig()
 	plugin, err := createPluginWithConfig(t, config)
 	require.NoError(t, err)
 	
@@ -1130,7 +1130,7 @@ func createTestPlugin(t *testing.T) *Plugin {
 
 // createTestPluginWithoutArtifact creates a plugin without artifact for error testing
 func createTestPluginWithoutArtifact(t *testing.T) *Plugin {
-	config := createTestConfig()
+	config := createRouterTestConfig()
 	config.Tuning.ArtifactURL = "http://nonexistent-url"
 	
 	plugin, err := createPluginWithConfig(t, config)
@@ -1141,7 +1141,7 @@ func createTestPluginWithoutArtifact(t *testing.T) *Plugin {
 
 // createTestPluginWithArtifactURL creates a plugin with specific artifact URL
 func createTestPluginWithArtifactURL(t *testing.T, url string) *Plugin {
-	config := createTestConfig()
+	config := createRouterTestConfig()
 	config.Tuning.ArtifactURL = url
 	config.Tuning.ReloadSeconds = 1 * time.Second // Short reload for testing
 	
@@ -1152,7 +1152,7 @@ func createTestPluginWithArtifactURL(t *testing.T, url string) *Plugin {
 }
 
 // createTestConfig creates a standard test configuration
-func createTestConfig() Config {
+func createRouterTestConfig() Config {
 	return Config{
 		Router: RouterConfig{
 			Alpha: 0.7,
@@ -1160,7 +1160,7 @@ func createTestConfig() Config {
 				Cheap: 0.6,
 				Hard:  0.3,
 			},
-			TopP: 0.05,
+			TopP: 5,
 			Penalties: PenaltyConfig{
 				LatencySD:    2.0,
 				CtxOver80Pct: 5.0,
@@ -1228,15 +1228,6 @@ func createPluginWithConfig(t *testing.T, config Config) (*Plugin, error) {
 }
 
 // Helper function to check if slice contains string
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
 // Helper function to check if any candidate contains "gemini"
 func containsGemini(candidates []string) bool {
 	for _, candidate := range candidates {

@@ -1,458 +1,223 @@
-# Project Spec — Bifrost Router with Avengers-style cost↔quality routing, GBDT triage, direct GPT-5/Gemini/Claude OAuth paths, and pluggable auth adapters
+**TL;DR:** Bifrost middleware is a **Go** plugin that implements `schemas.Plugin` with a **PreHook** you can use to read/mutate the `BifrostRequest` or short-circuit with a response/error; order is deterministic (PreHooks forward, PostHooks reverse). Register your plugin in `BifrostConfig.Plugins` (Go SDK) or via `APP_PLUGINS`/`-plugins` (HTTP gateway). ([Maxim AI][1])
 
-**TL;DR:** Build a Bifrost **PreHook** that (1) extracts cheap features; (2) runs a tiny **gradient-boosted tree (GBDT)** to pick a **bucket** (cheap ⇢ DeepSeek/Qwen via OpenRouter; mid ⇢ Claude via OAuth **or** GPT-5/Gemini with *mid* “thinking”; hard/long ⇢ GPT-5/Gemini with *high* “thinking”); (3) runs the paper’s **Avengers-Pro α-score** *inside that bucket* to choose the specific model. Use **direct API** for GPT-5 and Gemini (env keys), **OAuth passthrough** for Claude (and modular adapters for Gemini & OpenAI user auth), and **OpenRouter** for cheap models only. On **Claude 429**, immediately fall back to the best **non-Anthropic** candidate. Two sidecars/services: **Catalog** (live model/pricing/capabilities) and **Tuning** (train GBDT + α/threshold search). Avengers-Pro mechanism & gains are from the paper; GPT-5 exposes `reasoning_effort`; Gemini exposes `thinkingBudget` and 1M context; DeepSeek R1 and Qwen3-Coder are available on OpenRouter. ([arXiv][1], [OpenAI][2], [Google AI for Developers][3], [Google Cloud][4], [OpenRouter][5])
+### 1) What you’re targeting (interfaces & data shapes)
+
+* **Plugin interface (Go):**
+
+  ```go
+  type Plugin interface {
+    GetName() string
+    PreHook(*context.Context, *BifrostRequest) (*BifrostRequest, *PluginShortCircuit, error)
+    PostHook(*context.Context, *BifrostResponse, *BifrostError) (*BifrostResponse, *BifrostError, error)
+    Cleanup() error
+  }
+  ```
+
+  PreHook runs before provider I/O; return `(req', nil, nil)` to continue, or `(_, short, nil)` to short-circuit (cache, auth fail, etc.). PostHook always runs for each executed PreHook (even on short-circuits) and may transform the response or error. ([Maxim AI][1])
+* **Short-circuit control:**
+
+  ```go
+  type PluginShortCircuit struct {
+    Response *BifrostResponse
+    Error    *BifrostError
+    AllowFallbacks *bool // default true
+  }
+  ```
+
+  Use `AllowFallbacks=false` for hard denials (e.g., auth). ([Maxim AI][2])
+* **Request/response types (OpenAI-compatible):** `BifrostRequest{Provider, Model, Input{…}, Params, Fallbacks}`, `BifrostResponse{Choices, Model, Usage, ExtraFields{Provider,…}}`. For chat, mutate `Input.ChatCompletionInput` (array of `BifrostMessage{Role, Content{ContentStr|Blocks}, …}`). ([Maxim AI][1])
+
+### 2) Execution model & wiring (router placement, order, loading)
+
+* **Placement:** Router → **PreHook pipeline** → provider call (unless short-circuited) → **PostHook pipeline** (reverse order). **PreHooks execute in registration order**; **PostHooks reverse**. This symmetry guarantees cleanup/metrics even when you short-circuit. ([Maxim AI][3])
+* **Registering your plugin:**
+
+  * **Go SDK:** `bifrost.Init(BifrostConfig{Plugins: []schemas.Plugin{YourPlugin(...)}})`; order = slice order. ([Maxim AI][4])
+  * **HTTP gateway:** supply plugin names in `APP_PLUGINS="maxim,custom-plugin"` (Docker) or `-plugins "maxim,ratelimit,custom"` (binary). ([Maxim AI][3])
+
+### 3) PreRequest hook: a “porting contract”
+
+When you port existing logic into Bifrost, think of PreHook as a pure function on `(ctx, req)` with optional **policy gates** and **enrichment**:
+
+**Request read/write surface (most used):**
+
+* **Model & provider hints:** `req.Provider`, `req.Model`, `req.Fallbacks` (edit to steer routing).
+* **Messages:** `req.Input.ChatCompletionInput` slice of messages—prepend/append system text, redact user content, inject tool stubs.
+* **Params:** `req.Params` (temperature, max tokens, tool choice).
+  These are stable fields you’ll map to from your existing router/middleware. ([Maxim AI][1])
+
+**Short-circuit patterns (decide early, fail fast):**
+
+* **Cache hit:** return `PluginShortCircuit{Response: cached}`.
+* **Auth/quotas:** return `PluginShortCircuit{Error: &BifrostError{StatusCode: 401/429,…}, AllowFallbacks: boolPtr(false)}`.
+* **Static reply (maintenance):** set `Response` with a templated message. ([Maxim AI][2])
+
+**Context usage:** The hook receives a **pointer** to `context.Context` so you can enrich it (`*ctx = context.WithValue(*ctx, key, val)`) for downstream plugins/providers; avoid storing values globally. ([Maxim AI][2])
+
+### 4) Streaming, concurrency, and performance
+
+* **Streaming:** Plugins operate at request/response boundaries by default. For **stream-aware** work, PostHook can process streaming deltas (e.g., the bundled **JSON-parser** plugin fixes partial JSON chunks during streams, toggleable per-request via context). ([Bifrost][5])
+* **Concurrency:** Hooks run across many goroutines. Make your plugin **reentrant and thread-safe** (lock or use atomics for shared maps; avoid blocking network calls on hot paths; set timeouts). Bifrost isolates provider pools, uses backpressure and object pools; your plugin should respect context timeouts/cancellation. ([Maxim AI][6])
+* **Latency budget:** Simple plugins add **\~1–10 µs**; heavy I/O dominates—prefer caches, batched lookups, or async/queue handoff in PostHook. ([Maxim AI][3])
+
+### 5) “Claude-ready” porting checklist (the handoff spec)
+
+Give this to Claude (or any coder) as the exact contract to implement:
+
+1. **Module layout (Go):**
+
+````
+plugins/<your-plugin>/
+  main.go          // implements schemas.Plugin
+  plugin_test.go   // unit + integration tests
+  go.mod           // module name; require github.com/maximhq/bifrost
+  README.md
+``` :contentReference[oaicite:13]{index=13}
+
+2) **Public constructor & name:** `New<Plugin>(Config) Plugin` and `GetName() string` returns a unique, stable name. :contentReference[oaicite:14]{index=14}
+
+3) **Config surface (plain-English schema):**  
+- Required: feature flags, denylist/allowlist rules, cache TTL, external endpoints (with timeouts).  
+- Optional: per-model overrides; context keys to toggle behaviors (e.g., `Enable<Feature>`).  
+Keep JSON-serializable; validate eagerly.
+
+4) **PreHook algorithm (pseudocode):**  
+````
+
+Input: \*ctx, \*req
+
+1. Read identity from ctx (X-API-Key/JWT) → userID or orgID.
+2. Enforce org policy:
+
+   * if model ∉ allowed\[orgID] → shortCircuit(Error 403, AllowFallbacks=false).
+   * if tokens\_over\_budget(req, orgID) → shortCircuit(Error 429, AllowFallbacks=false).
+3. Transform:
+
+   * If chat: rewrite messages (prepend system guardrails; redact PII).
+   * Tune params: clamp temperature/max\_tokens per policy.
+   * Optionally set req.Fallbacks for resilience.
+4. Cache probe (key := hash(provider, model, messages, params)):
+
+   * if hit → shortCircuit(Response=cached).
+5. Context enrichment:
+
+   * \*ctx = withValue(\*ctx, "tenant", orgID); withValue(\*ctx, "<feature-flags>", flags)
+6. return (req', nil, nil)
+
+````
+(Errors via `PluginShortCircuit.Error`; never panic; always respect `context`.)
+
+5) **PostHook algorithm (for observability/recovery):**  
+- On success: record metrics; update cache.  
+- On `BifrostError` with 429/5xx: optionally synthesize fallback response or just pass through. :contentReference[oaicite:15]{index=15}
+
+6) **Registration & order:** In the host app:  
+```go
+bifrost.Init(BifrostConfig{
+  Account: &MyAccount{},
+  Plugins: []schemas.Plugin{ Authz(), Quotas(), YourPlugin(cfg), Observability() },
+})
+// Order matters: auth/limits → transforms → caching/observability
+````
+
+For the HTTP gateway binary: `APP_PLUGINS="maxim,your-plugin"` or `-plugins "maxim,your-plugin"`. ([Maxim AI][4])
+
+7. **Thread safety & limits:**
+
+* Protect shared maps (`sync.RWMutex`) or use `sync.Map`.
+* Bound external I/O (timeouts, circuit-breakers).
+* Honor cancellation: check `ctx.Err()` in loops. ([Maxim AI][6])
+
+8. **Tests:**
+
+* **Unit:** PreHook transformation and short-circuit paths (happy + deny + cache-hit).
+* **Integration:** Initialize a test Bifrost with your plugin chain; assert order and side-effects. The docs include working unit/integration patterns you can mirror. ([Maxim AI][2])
+
+9. **Streaming (optional):** If your legacy logic massages SSE tokens, model it after the **JSON Parser** plugin: enable via context key; operate only on streaming chunks in PostHook; keep a bounded per-request buffer and a cleanup timer. ([Bifrost][5])
 
 ---
 
-## 0) Assumptions (explicit)
+### 6) Trade-offs & gotchas
 
-* **Platform:** Bifrost gateway that supports request-mutation PreHooks and PostHooks.
-* **Primary objective:** maximize **quality per \$** with **quality slightly > price**, maintain interactive latency.
-* **Providers:**
+* **Power vs. latency:** Every network hop in PreHook taxes your P99. Prefer local policy + cache in PreHook; shove heavy enrichment to PostHook or to a sidecar queue. ([Maxim AI][3])
+* **Ordering hazards:** If you mutate messages then run a cache plugin, ensure the cache key reflects **post-transform** content or you’ll poison the cache. ([Maxim AI][4])
+* **Fallback semantics:** Be explicit—deny flows should set `AllowFallbacks=false` so you don’t “fail open.” ([Maxim AI][2])
+* **Concurrency races:** Avoid writing to shared plugin state without locks; Bifrost will run many requests in parallel. ([Maxim AI][6])
 
-  * **Claude** (Code/Sonnet): **direct Anthropic** via **user OAuth** token in headers, when present.
-  * **GPT-5**: **direct OpenAI** via `OPENAI_API_KEY`; use `reasoning_effort`. ([OpenAI][2])
-  * **Gemini 2.5 Pro**: **direct Gemini** via **API key** (or **OAuth token** where available); supports **thinking** + **1,048,576** token input. ([Google AI for Developers][3])
-  * **Cheap pool:** **DeepSeek R1** and **Qwen3-Coder** via **OpenRouter** (Anthropic excluded). ([OpenRouter][5])
-* **Catalog & tuning** run as separate services with HTTP/gRPC APIs.
-* **OAuth “trick”:** we modularize per-provider **AuthAdapters**; **Gemini supports OAuth** for the API; **OpenAI’s model API is key-based** (no official end-user OAuth for model calls), so the “OpenAI OAuth” module is a BYOK shim unless OpenAI later ships it. ([Google AI for Developers][6], [Anthropic][7])
-
----
-
-## 1) Architecture (high level)
-
-**Data-plane (Bifrost plugins):**
-
-* **Router PreHook** (this project): feature extraction → **GBDT triage (3-way)** → **Avengers α-score in-bucket** → choose target `{kind, model, params, auth}` and rewrite request accordingly.
-* **Evaluator PostHook:** collects latency, tokens, provider headers (rate limits), judge scores; emits training rows.
-
-**Control-plane services (separate processes):**
-
-1. **Catalog Service**
-
-   * Syncs: **OpenRouter models** (slugs, price, context, features), **OpenAI GPT-5** (price, `reasoning_effort` support, context), **Gemini 2.5** (context, `thinkingBudget` ranges), and feature flags (JSON mode, tools). Exposes **read-only API** used by Router + Tuning. ([OpenRouter][8], [OpenAI][2], [Google AI for Developers][3])
-2. **Tuning Service**
-
-   * Trains **GBDT triage** + fits **α, thresholds** from logs, and exports the **Avengers artifact** `{centroids, Q̂[m,c], Ĉ[m], penalties}`. Uses LightGBM/XGBoost. Avengers-Pro clustering & α-score come from the paper. ([arXiv][1])
-
-**Auth Adapters (modular):**
-
-* **AnthropicOAuthAdapter** (Claude Code): uses inbound user token; forwards to Anthropic endpoints. Docs reference IAM/enterprise setup. ([Anthropic][9])
-* **GeminiOAuthAdapter**: supports **OAuth bearer** per Google’s guide, else env key. ([Google AI for Developers][6])
-* **OpenAIKeyAdapter**: uses env key by default; optionally “user-key” store (not true OAuth). Be explicit that **OpenAI model API has no official OAuth for model calls**. ([OpenAI Community][10], [Anthropic][7])
-
----
-
-## 2) Routing algorithm (single, cohesive)
-
-We keep Avengers-Pro’s mechanism for **in-bucket** selection and add a **GBDT triager** for bucket choice.
-
-### 2.1 Features (per request, ≤25 ms budget)
-
-* **Embedding** of prompt (self-hosted; cached).
-* **Cluster signals:** nearest centroid id, top-p distances.
-* **Lexical:** token count, code/math flags (regex), n-gram entropy.
-* **Context fit:** estimated tokens vs model context capacity (from Catalog).
-* **Historical:** per-user success/latency priors (optional).
-
-### 2.2 Buckets
-
-* **Cheap:** `deepseek/deepseek-r1`, `qwen/qwen3-coder` (OpenRouter). ([OpenRouter][5])
-* **Mid:** **Claude** (if Anthropic OAuth present) **or** **GPT-5/Gemini** with **mid thinking**.
-* **Hard/Long:** **GPT-5/Gemini** with **high thinking**; if `ctx_in` is huge (≥200k), prefer **Gemini 2.5 Pro** for long-context. ([Google AI for Developers][3])
-
-### 2.3 Thinking budgets (provider-specific mapping)
-
-* **GPT-5:** set `reasoning_effort` ∈ {`low`,`medium`,`high`}. For reference, Google’s OpenAI-compat doc maps OpenAI levels to **\~1K / 8K / 24.6K reasoning tokens** (useful for target budgets and telemetry). ([Google AI for Developers][11])
-* **Gemini:** set `thinkingBudget` (integer tokens). Gemini docs: **Pro supports “Thinking”** with budget control; **1,048,576** input token limit; thinking guide describes budget semantics. Use **4–8k** for *mid*, **16–32k** for *hard*; allow `-1` (dynamic) as an experiment. ([Google AI for Developers][3], [Google Cloud][12])
-
-### 2.4 Decision flow (deterministic, fail-safe)
+### 7) Minimal “porting template” (Claude can fill the blanks)
 
 ```
-features ← extract(req)
-bucket_probs ← GBDT(features)            # p_cheap, p_mid, p_hard
+type Config struct {
+  // feature flags, allowlists, cacheTTL, http endpoints, timeouts...
+}
+type Plugin struct {
+  name string
+  cfg  Config
+  // caches, clients (thread-safe), metrics handles...
+}
+func New(cfg Config) *Plugin { ... }            // validate cfg
+func (p *Plugin) GetName() string { return p.name }
 
-if context_exceeds(cheap_models):        # guardrail
-    bucket ← hard
-else if context_exceeds(mid_models):
-    bucket ← hard
-else if p_hard > τ_hard:
-    bucket ← hard
-else if p_cheap > τ_cheap:
-    bucket ← cheap
-else:
-    bucket ← mid
+func (p *Plugin) PreHook(ctx *context.Context, req *schemas.BifrostRequest)
+  (*schemas.BifrostRequest, *schemas.PluginShortCircuit, error) {
+  // 1) identity & policy  2) transforms  3) cache probe  4) ctx enrich
+}
 
-if bucket == cheap:
-    candidates ← {DeepSeek-R1, Qwen3-Coder}      # OpenRouter
-    pick ← argmax_m α·Q̂[m,c] − (1−α)·Ĉ[m] − penalties
-    route_openrouter(pick, anthropic_excluded=true)
+func (p *Plugin) PostHook(ctx *context.Context, res *schemas.BifrostResponse, be *schemas.BifrostError)
+  (*schemas.BifrostResponse, *schemas.BifrostError, error) {
+  // metrics, cache fill, optional error recovery (429/5xx)
+}
 
-if bucket == mid:
-    if has_anthropic_oauth(req.headers):
-        route_anthropic_oauth(claude_model)
-    else:
-        candidates ← {GPT-5(mid), Gemini(mid)}
-        pick ← α-score
-        route_direct(pick)
-
-if bucket == hard:
-    candidates ← {GPT-5(high), Gemini(high)}
-    if very_long_context: bias_to(Gemini)
-    pick ← α-score
-    route_direct(pick)
+func (p *Plugin) Cleanup() error { /* close clients, flush */ }
 ```
 
-**On Anthropic 429 / rate-limit:** **do not retry** Anthropic; immediately recompute **best non-Anthropic** for the same bucket and **reissue** (OpenRouter for cheap; GPT-5/Gemini for mid/hard). Record “escalated-from-anthropic=true”.
+(Claude: implement per the interface; keep structures private; expose only `New`.)
 
 ---
 
-## 3) Services and APIs
+**Primary references:** official plugin API & examples, schema shapes, lifecycle/loader, concurrency model, and a streaming-aware example plugin. ([Maxim AI][4], [Bifrost][5])
 
-### 3.1 Catalog Service (separate)
+[1]: https://www.getmaxim.ai/docs/bifrost/usage/go-package/schemas "Schemas - Maxim Docs"
+[2]: https://www.getmaxim.ai/docs/bifrost/contributing/plugin "Plugin Development Guide - Maxim Docs"
+[3]: https://www.getmaxim.ai/docs/bifrost/architecture/plugins "Plugin System Architecture - Maxim Docs"
+[4]: https://www.getmaxim.ai/docs/bifrost/usage/go-package/plugins "Plugins - Maxim Docs"
+[5]: https://docs.getbifrost.ai/features/plugins/jsonparser "JSON Parser - Bifrost"
+[6]: https://www.getmaxim.ai/docs/bifrost/architecture/concurrency "Concurrency Model - Maxim Docs"
 
-**Responsibilities:** fetch & normalize **models, slugs, prices, context, capabilities, thinking/effort params**, and provider quirks.
+**TL;DR:** In the HTTP gateway, “middleware” = a Go plugin that implements `schemas.Plugin` and is passed into `bifrost.Init(...)`. Your `PreHook(ctx, *BifrostRequest)` runs before provider routing; mutate the request (model, params, headers-derived metadata) or short-circuit; then wire the plugin into a thin HTTP-gateway main and build. ([Go Packages][1], [Bifrost][2])
 
-**Ingestors:**
+**Idea → mechanism.** Bifrost’s core exposes a first-class plugin contract:
 
-* **OpenRouter:** `/api/v1/models` + model pages for price/context caps; **exclude Anthropic** in our consumer. ([OpenRouter][8])
-* **OpenAI GPT-5:** pricing; `reasoning_effort`, context maxima. ([OpenAI][2])
-* **Gemini 2.5:** models page (Pro/Flash), thinking docs, context limits. ([Google AI for Developers][3])
-
-**API (HTTP/JSON):**
-
-* `GET /v1/models?provider=openrouter|openai|google&family=deepseek|qwen|gpt5|gemini`
-* `GET /v1/capabilities/:model` → `{ctx_in_max, ctx_out_max, supports_json, tools, thinking: {type: "effort"|"budget", ranges}}`
-* `GET /v1/pricing/:model` → `{in_per_million, out_per_million}`
-* `GET /v1/feature-flags` (e.g., disable model X)
-
-**Data model (normalized):**
-
-```json
-{
-  "slug": "deepseek/deepseek-r1",
-  "provider": "openrouter",
-  "family": "deepseek",
-  "ctx_in": 163840,
-  "params": { "thinking": false, "json": true },
-  "pricing": { "in": 0.40, "out": 2.00, "unit": "USD_per_1M_tokens" }
+```go
+type Plugin interface {
+  GetName() string
+  PreHook(ctx *context.Context, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.PluginShortCircuit, error)
+  PostHook(ctx *context.Context, res *schemas.BifrostResponse, err *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error)
+  Cleanup() error
 }
 ```
 
-(Values for R1 and Qwen3-Coder verified on OpenRouter pages.) ([OpenRouter][5])
+`PreHook` executes on the hot path before provider selection and fallback; return a modified `req`, or a `PluginShortCircuit{Response|Stream|Error}` to bypass the upstream call (set `Error.AllowFallbacks = false` to block fallbacks). You register your plugin by constructing it and passing it in `schemas.BifrostConfig{Plugins: []schemas.Plugin{...}}` when you create the core instance the HTTP transport uses. The HTTP transport converts OpenAI/Anthropic/GenAI-style requests into a `BifrostRequest`, injects HTTP headers into context, and calls the core; you can read caller metadata (e.g., `x-bf-vk`, `x-bf-user-id`, `x-bf-team-id`, `x-bf-trace-id`) from the request context for routing, labeling, or governance. ([Go Packages][1]) ([Go Packages][3]) ([Bifrost][2])
 
-**Refresh cadence:** hourly poll; diff + version.
+**What to implement (HTTP-gateway specific).** 1) **Plugin package**: `plugins/yourmw` exporting `New(config any) (schemas.Plugin, error)`. In `PreHook`, do pure, fast mutations—e.g., normalize `req.Model` (`"gpt-4o"`→`"openai/gpt-4o-mini"`), set `req.Provider`, enrich `req.Input` (system prelude, tool policy), or inject trace labels in `req.ExtraFields`. To reject/redirect, return `PluginShortCircuit{Error: &BifrostError{..., AllowFallbacks: ptr(false)}}` or a synthetic `Response`. 2) **Wire into the gateway**: create a tiny `main` that starts the HTTP transport but supplies your initialized core with plugins:
 
-### 3.2 Tuning Service (separate)
-
-**Inputs:**
-
-* PostHook logs: `{prompt_id, cluster_id, model, cost_in,out, latency, label/grade, success}`
-* Catalog snapshots (for normalization)
-* Avengers artifacts from prior run
-
-**Jobs:**
-
-* **Clustering** (k-means) on embeddings; save centroids.
-* **Per-cluster Q̂ & Ĉ** for models (quality & normalized cost).
-* **GBDT triage** training (3-class: cheap/mid/hard).
-* **Hyperparameter search** over `α`, thresholds `τ_cheap, τ_hard`, penalty weights (latency, context).
-* **Export artifact** (versioned) to object store; **notify Router** to hot-reload.
-
-**Artifact format (single JSON/TAR):**
-
-```json
-{
-  "version": "2025-08-27T12:00Z",
-  "centroids": "faiss_index.bin",
-  "alpha": 0.60,
-  "thresholds": { "cheap": 0.62, "hard": 0.58 },
-  "penalties": { "latency_sd": 0.05, "ctx_over_80pct": 0.15 },
-  "qhat": { "deepseek/deepseek-r1": [ ... per cluster ... ], "qwen/qwen3-coder": [ ... ] },
-  "chat": { "deepseek/deepseek-r1": 0.12, "qwen/qwen3-coder": 0.09, "openai/gpt-5": 0.75, "google/gemini-2.5-pro": 0.55 },
-  "gbdt": { "framework": "lightgbm", "model.bin": "…", "feature_schema": { ... } }
-}
+```go
+client, _ := bifrost.Init(schemas.BifrostConfig{
+  Account: yourAccount,                      // providers, keys, timeouts
+  Plugins: []schemas.Plugin{yourPlugin},     // <- prerequest middleware here
+})
+// hand `client` to the HTTP transport’s server bootstrap (same binary)
 ```
 
-(Avengers-Pro core idea—clusters + α trade-off—comes from the paper.) ([arXiv][1])
+Run exactly the same HTTP endpoints (`/v1/chat/completions`, `/openai/v1/chat/completions`, etc.). Build and run with the documented flags (`-app-dir`, `-port`; env keys like `OPENAI_API_KEY` are auto-detected); the transport is FastHTTP and exposes provider-native compatibility routes, so your clients don’t change—only the base URL. ([Go Packages][3])
 
----
+**Trade-offs & constraints.** Today the stable path is **compile-time registration** (your custom binary includes the plugin) rather than hot-loading; you keep zero overhead and type safety, but upgrades mean a quick rebuild. `PreHook` is on the hot path—treat it like a router filter: avoid blocking I/O, prefer O(1) lookups, and use immutable config. For streaming short-circuits you must return a channel in `PluginShortCircuit.Stream`. Any error you surface can allow or suppress fallbacks via `AllowFallbacks` (nil means “allow”). Keep the plugin stateless or guard mutable state for high concurrency. ([Go Packages][1])
 
-## 4) Bifrost Plugin (data-plane)
+**Next steps (handable to Claude Code):**
 
-### 4.1 PreHook — `Router.Decide(ctx, req) -> Decision`
+1. Scaffold `plugins/yourmw` implementing `schemas.Plugin` with a focused `PreHook` (read needed `x-bf-*` headers from context; set provider/model/params; optional short-circuit). 2) Add a `cmd/bifrost-http-with-yourmw` that initializes the core with your plugin and starts the HTTP transport; build and run with `-app-dir`/`-port` and your provider env keys. 3) Smoke-test via `/openai/v1/chat/completions` while sending `x-bf-*` headers; verify routing and labels. 4) Add a `PostHook` only if you need response rewriting or accounting. References: core plugin interface & config; HTTP transport endpoints/flags; header contract for passing metadata. ([Go Packages][1], [Bifrost][2])
 
-**Inputs:** request (prompt, headers), Catalog cache, latest Tuning artifact.
 
-**Steps:**
-
-1. **Auth detect:** `AuthAdapter.match(req.headers)` → `{provider, type, token}`.
-2. **Features:** embed; ANN top-p centroids; lexical features; context estimate.
-3. **GBDT triage:** `p = gbdt.predict_proba(features)` → choose bucket via thresholds and guardrails.
-4. **In-bucket α-score:** score candidate models using `Q̂`/`Ĉ` and penalties (latency prior, context pressure).
-5. **Thinking params:**
-
-   * GPT-5: set `reasoning_effort = "medium"` for **mid**; `"high"` for **hard**. ([OpenAI][2])
-   * Gemini: set `thinkingBudget = 4000–8000` for **mid**; `16000–32000` for **hard** (respect model limits; Pro supports thinking and 1M context). ([Google AI for Developers][3], [Google Cloud][12])
-6. **Rewrite:**
-
-   * **Claude path:** `kind="anthropic"`, pass user OAuth headers unchanged; **no OpenRouter**.
-   * **Direct path:** `kind="openai"` or `kind="google"`; attach API key from env; set thinking params.
-   * **Cheap path:** `kind="openrouter"`, set `model=deepseek/deepseek-r1` or `qwen/qwen3-coder`; set `provider.sort` and **exclude Anthropic**.
-
-**Decision shape (internal):**
-
-```json
-{
-  "kind": "anthropic" | "openai" | "google" | "openrouter",
-  "model": "anthropic/claude-3.7-sonnet" | "openai/gpt-5" | "google/gemini-2.5-pro" | "deepseek/deepseek-r1" | "qwen/qwen3-coder",
-  "params": { "reasoning_effort": "low|medium|high|minimal", "thinkingBudget": 16000, "max_output_tokens": 2048 },
-  "provider_prefs": { "sort": "latency", "max_price": 0.006, "allow_fallbacks": true },
-  "auth": { "mode": "oauth|env|userkey", "token_ref": "…" },
-  "fallbacks": ["deepseek/deepseek-r1", "qwen/qwen3-coder"]
-}
-```
-
-### 4.2 PostHook — `Router.Log(ctx, req, resp)`
-
-* Persist: `{decision, costs, latency, provider_headers, 429_flags, labels_if_any}` to the warehouse.
-* Emit counters: route share by bucket, win-rate vs. baseline, cost/task, P95 latency.
-
-### 4.3 Error & fallback rules (authoritative)
-
-| Condition                          | Action                                                                                                                 |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| **Claude** returns **429 / quota** | **Immediate** reroute to best **non-Anthropic** candidate for same bucket; mark cooldown on this user (e.g., 3–5 min). |
-| **OpenAI/Gemini** errors (5xx)     | Cross-fallback **within hard/mid** bucket (e.g., GPT-5 ⇄ Gemini).                                                      |
-| **OpenRouter** 5xx                 | Try other cheap model; if both down and `p_hard` high, escalate to **Gemini mid**.                                     |
-| **Context overflow**               | If cheap/mid can’t fit, force **hard** (Gemini first for huge input).                                                  |
-
----
-
-## 5) Auth Adapters (modular, pluggable)
-
-Create a mini-framework so you can drop adapters in/out or move them to another repo.
-
-**Interface:**
-
-```ts
-interface AuthAdapter {
-  id: "anthropic-oauth" | "google-oauth" | "openai-key" | "user-key" | string
-  matches(reqHeaders: Headers): boolean
-  extract(reqHeaders: Headers): { scheme: "Bearer"|"ApiKey", token: string }
-  apply(outgoing: HttpRequest): HttpRequest    // set Authorization & any provider-specific headers
-  validate?(token: string): Promise<boolean>   // optional, for health checks
-}
-```
-
-**Included adapters:**
-
-* **AnthropicOAuthAdapter**: Detects Anthropic OAuth (Claude Code). Forwards bearer; no OpenRouter. IAM docs cover enterprise auth set-up. ([Anthropic][9])
-* **GeminiOAuthAdapter**: Implements Google OAuth bearer flow (Authorization: Bearer `<access_token>`), supports PKCE; otherwise falls back to `GEMINI_API_KEY`. ([Google AI for Developers][6])
-* **OpenAIKeyAdapter**: Uses `OPENAI_API_KEY` from env. Note: **no official OpenAI end-user OAuth** for raw model API; treat any “OpenAI OAuth” as BYOK storage. ([OpenAI Community][10], [Anthropic][7])
-
-> **Note:** If you later obtain product-specific “agent OAuth” tokens (e.g., from a hosted agent product), add a new adapter without touching the router.
-
----
-
-## 6) Config (one file, operator-friendly)
-
-```yaml
-router:
-  alpha: 0.60                   # quality tilt
-  thresholds:
-    cheap: 0.62
-    hard: 0.58
-  top_p: 3
-  penalties:
-    latency_sd: 0.05
-    ctx_over_80pct: 0.15
-  bucket_defaults:
-    mid:
-      gpt5_reasoning_effort: medium
-      gemini_thinking_budget: 6000
-    hard:
-      gpt5_reasoning_effort: high
-      gemini_thinking_budget: 20000
-  cheap_candidates: [ "deepseek/deepseek-r1", "qwen/qwen3-coder" ]
-  mid_candidates:   [ "openai/gpt-5", "google/gemini-2.5-pro" ]   # Claude is governed by OAuth presence
-  hard_candidates:  [ "openai/gpt-5", "google/gemini-2.5-pro" ]
-  openrouter:
-    exclude_authors: [ "anthropic" ]
-    provider:
-      sort: latency
-      max_price: 0.006
-      allow_fallbacks: true
-
-auth_adapters:
-  enabled: [ "anthropic-oauth", "google-oauth", "openai-key" ]
-
-catalog:
-  base_url: http://catalog:8080
-  refresh_seconds: 3600
-
-tuning:
-  artifact_url: s3://llm-router/artifacts/latest.tar
-  reload_seconds: 300
-```
-
----
-
-## 7) Implementation plan (keep the implementer on rails)
-
-**Milestone 1 — Scaffolding (2–3 days)**
-
-* Create **Catalog Service** (read-only): implement ingestors for OpenRouter `/models`, OpenAI GPT-5 (static config initial), Gemini models; persist to SQLite/JSON; serve endpoints above. ([OpenRouter][8], [OpenAI][2], [Google AI for Developers][3])
-* Define **AuthAdapter** interface; stub three adapters.
-* Bifrost **PreHook** skeleton: read config; call Catalog; no ML yet (route by fixed rules for smoke tests).
-
-**Milestone 2 — Avengers core + embeddings (3–5 days)**
-
-* Integrate **embeddings** (self-host or fast local; cache by prompt hash).
-* Implement **ANN** (FAISS) for cluster lookup.
-* Implement **α-score** and artifact loading (use dummy artifact initially).
-* Wire **cheap bucket** via OpenRouter (ensure Anthropic excluded). ([OpenRouter][8])
-
-**Milestone 3 — GBDT triage (3–4 days)**
-
-* Build **Tuning Service** training job: features, labels (cheap vs mid vs hard by empirical win-per-\$), LightGBM model, thresholds export.
-* PreHook: integrate **GBDT.predict\_proba**; guardrails for context.
-* Add **thinking param mappers**: GPT-5 `reasoning_effort`; Gemini `thinkingBudget`. ([OpenAI][2], [Google AI for Developers][13])
-
-**Milestone 4 — Direct providers & OAuth (3–5 days)**
-
-* **Gemini direct** (API key) and **OAuth** path (PKCE) with token cache; respect 1M context. ([Google AI for Developers][3])
-* **OpenAI GPT-5 direct** (env key); set `reasoning_effort`. ([OpenAI][2])
-* **Claude OAuth** path: forward user token; **429 handling → non-Anthropic** fallback. (IAM ref) ([Anthropic][9])
-
-**Milestone 5 — Observability & guardrails (2–3 days)**
-
-* PostHook logging; dashboards: route share, cost/task, P95 latency, 429 escalations, win-rate vs baseline.
-* SLO checks: block deploy if P95>target or failover misfires.
-
-**Milestone 6 — Optimizer loop (ongoing)**
-
-* Nightly **Catalog** refresh; weekly **Tuning** (retrain GBDT + α/thresholds).
-* Canary rollout: 5% traffic, then 25/50/100.
-
----
-
-## 8) Testing & acceptance criteria
-
-**Unit:**
-
-* AuthAdapters: header detection, token application, env-key fallback.
-* Context guards: overflow triggers hard bucket.
-* α-score correctness on synthetic `Q̂`/`Ĉ`.
-
-**Integration:**
-
-* **Claude OAuth** → 429 injection → OpenRouter fallback within 300 ms.
-* **GPT-5/Gemini**: verify `reasoning_effort` / `thinkingBudget` appear in requests and influence latency/quality. ([OpenAI][2], [Google AI for Developers][13])
-* **OpenRouter**: model exclusion list enforced; provider sorting honored. ([OpenRouter][14])
-
-**E2E canaries:**
-
-* Easy code prompts route to DeepSeek/Qwen ≥70% of time; hard math routes to GPT-5/Gemini ≥80%; long-context to Gemini ≥90% when input >200k. (Tune after week 1.)
-* **Acceptance gate:** non-inferior pass\@1 vs single best model within −2% at ≥25% lower cost on your eval; P95 ≤ 2.5 s interactive; zero Anthropic calls when no OAuth header.
-
----
-
-## 9) Security & compliance
-
-* **Secrets:** provider keys via env/secret manager; never log tokens or prompts with PII.
-* **OAuth:** store **Gemini** refresh tokens encrypted; **Anthropic** tokens are transient; **OpenAI** uses env keys (until official OAuth exists). ([Google AI for Developers][6], [Anthropic][7])
-* **Isolation:** Catalog/Tuning services are read-only from the data-plane; artifacts signed + versioned.
-
----
-
-## 10) Ops runbook (failure modes)
-
-* **Anthropic 429 spike:** verify adapter; reduce mid-bucket prior for affected users; OpenRouter cheap takes over.
-* **Gemini INVALID\_ARGUMENT on thinkingBudget:** clamp to model-specific min/max (Pro min \~128, max \~32k per Vertex doc); log. ([Google Cloud][12])
-* **GPT-5 timeouts at high effort:** drop to `medium`; reissue once; else switch to Gemini hard. ([OpenAI][2])
-* **Catalog drift (price/context):** artifact invalidation; force refresh.
-
----
-
-## 11) Developer notes (pragmatics & knobs)
-
-* Start `α=0.60` (quality-tilted).
-* Set **mid thinking**: GPT-5=`medium`; Gemini `thinkingBudget≈6k`. **Hard**: GPT-5=`high`; Gemini `≈20k`. Adjust after logs; don’t exceed Pro limits. ([OpenAI][2], [Google Cloud][12])
-* Huge input (≥200k tokens): bias to **Gemini 2.5 Pro** (1M input) unless hard guardrails say otherwise. ([Google AI for Developers][3])
-
----
-
-## 12) File layout (suggested)
-
-```
-/router/
-  /plugins/bifrost/
-    router_prehook.ts
-    router_posthook.ts
-    adapters/
-      anthropic_oauth.ts
-      gemini_oauth.ts
-      openai_key.ts
-    scoring/
-      alpha_score.ts
-      penalties.ts
-    triage/
-      gbdt_runtime.ts
-      features.ts
-      ann_index.ts
-    config.schema.yaml
-    config.example.yaml
-  /services/catalog/
-    ingest_openrouter.ts
-    ingest_openai.ts
-    ingest_gemini.ts
-    api.ts
-    store.sqlite
-  /services/tuning/
-    train_gbdt.py
-    fit_clusters.py
-    export_artifact.py
-    api_publish.py
-  /artifacts/
-    latest.tar
-  /ops/
-    dashboards/
-    runbooks/
-```
-
----
-
-## 13) Citations (key facts you’ll rely on)
-
-* **Avengers-Pro** test-time routing (clusters + α trade-off; reported cost/quality Pareto). ([arXiv][1])
-* **GPT-5** API: `reasoning_effort` control, pricing, long-context improvements. ([OpenAI][2])
-* **Gemini**: thinking budget control and 1M-token input limit; Pro supports thinking; budget semantics. ([Google AI for Developers][3])
-* **Token ranges for thinking** (reference mapping of OpenAI levels to token counts). ([Google AI for Developers][11])
-* **OpenRouter**: models API and specific **DeepSeek R1** / **Qwen3-Coder** slugs & pricing. ([OpenRouter][8])
-* **OAuth reality:** Gemini API supports OAuth; OpenAI model API is key-based; Anthropic enterprise docs for Claude Code IAM (used with OAuth tokens in practice). ([Google AI for Developers][6], [Anthropic][7])
-
----
-
-### What to do next
-
-* Green-light **Catalog & Tuning** as separate repos/services.
-* Confirm **Claude OAuth header names** you’ll receive; we’ll key the Anthropic adapter to those.
-* I’ll synthesize an **initial artifact** (dummy centroids + priors) so you can deploy and start logging immediately; the Tuning service will replace it after week 1 with real data.
-
-The plan keeps Avengers’ math intact, adds a fast SOTA triager, honors your direct-provider/OAuth constraints, and leaves room for optimizer-driven tuning without code changes.
-
-[1]: https://arxiv.org/abs/2508.12631?utm_source=chatgpt.com "Beyond GPT-5: Making LLMs Cheaper and Better via Performance-Efficiency Optimized Routing"
-[2]: https://openai.com/index/introducing-gpt-5-for-developers/ "Introducing GPT‑5 for developers | OpenAI"
-[3]: https://ai.google.dev/gemini-api/docs/models "Gemini models  |  Gemini API  |  Google AI for Developers"
-[4]: https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-pro?utm_source=chatgpt.com "Gemini 2.5 Pro | Generative AI on Vertex AI"
-[5]: https://openrouter.ai/deepseek/deepseek-r1?utm_source=chatgpt.com "R1 - API, Providers, Stats"
-[6]: https://ai.google.dev/gemini-api/docs/oauth?utm_source=chatgpt.com "Authentication with OAuth quickstart - Gemini API"
-[7]: https://docs.anthropic.com/en/api/overview?utm_source=chatgpt.com "Overview"
-[8]: https://openrouter.ai/docs/api-reference/list-available-models?utm_source=chatgpt.com "List available models | OpenRouter | Documentation"
-[9]: https://docs.anthropic.com/en/docs/claude-code/iam?utm_source=chatgpt.com "Identity and Access Management"
-[10]: https://community.openai.com/t/will-there-be-oauth-available-for-the-api-endpoints/24981?utm_source=chatgpt.com "Will there be OAuth Available for the API endpoints?"
-[11]: https://ai.google.dev/gemini-api/docs/openai "OpenAI compatibility  |  Gemini API  |  Google AI for Developers"
-[12]: https://cloud.google.com/vertex-ai/generative-ai/docs/thinking?utm_source=chatgpt.com "Thinking | Generative AI on Vertex AI"
-[13]: https://ai.google.dev/gemini-api/docs/thinking?utm_source=chatgpt.com "Gemini thinking | Gemini API | Google AI for Developers"
-[14]: https://openrouter.ai/docs/quickstart?utm_source=chatgpt.com "OpenRouter Quickstart Guide | Developer Documentation"
+[1]: https://pkg.go.dev/github.com/maximhq/bifrost/core%40v1.1.24/schemas "schemas package - github.com/maximhq/bifrost/core/schemas - Go Packages"
+[2]: https://docs.getbifrost.ai/integrations/genai-sdk?utm_source=chatgpt.com "Google GenAI SDK - Bifrost"
+[3]: https://pkg.go.dev/github.com/maximhq/bifrost/transports/bifrost-http "bifrost-http command - github.com/maximhq/bifrost/transports/bifrost-http - Go Packages"
